@@ -16,7 +16,7 @@ data class IconPatch(
     val representativeColor: Int,
 ) {
     companion object {
-        const val PATCH_DIM = 12
+        const val PATCH_DIM = 8
         const val PATCH_SIZE = PATCH_DIM * PATCH_DIM
     }
 }
@@ -45,7 +45,7 @@ class TilePrototypeBank {
     /**
      * Matches an unoccluded icon patch against known prototypes or registers a new prototype.
      */
-    fun matchOrRegisterUnoccluded(patch: IconPatch, threshold: Float = 0.84f): Pair<Int, Float> {
+    fun matchOrRegisterUnoccluded(patch: IconPatch, threshold: Float = 0.77f): Pair<Int, Float> {
         var bestId = -1
         var bestSim = -1f
 
@@ -90,7 +90,7 @@ class TilePrototypeBank {
      * Matches a partially occluded lower-layer tile ONLY across its unoccluded visible cells.
      * Never registers a new prototype from an occluded tile.
      */
-    fun matchOccluded(patch: IconPatch, minVisibleFraction: Float = 0.36f, threshold: Float = 0.79f): Pair<Int, Float> {
+    fun matchOccluded(patch: IconPatch, minVisibleFraction: Float = 0.30f, threshold: Float = 0.70f): Pair<Int, Float> {
         val minCells = (IconPatch.PATCH_SIZE * minVisibleFraction).toInt()
         if (patch.visibleCount < minCells || prototypes.isEmpty()) {
             return -1 to 0f
@@ -138,7 +138,7 @@ class TilePrototypeBank {
             sumPR += patch.gridR[i]; sumPG += patch.gridG[i]; sumPB += patch.gridB[i]; sumPE += patch.gridEdge[i]
             sumQR += proto.gridR[i]; sumQG += proto.gridG[i]; sumQB += proto.gridB[i]; sumQE += proto.gridEdge[i]
         }
-        if (count < 16) return 0f
+        if (count < 12) return 0f
 
         val meanPR = sumPR / count; val meanPG = sumPG / count; val meanPB = sumPB / count; val meanPE = sumPE / count
         val meanQR = sumQR / count; val meanQG = sumQG / count; val meanQB = sumQB / count; val meanQE = sumQE / count
