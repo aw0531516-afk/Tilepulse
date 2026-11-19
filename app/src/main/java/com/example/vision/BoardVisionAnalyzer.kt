@@ -35,6 +35,8 @@ class BoardVisionAnalyzer(
         bitmap: Bitmap,
         roi: RoiCalibration,
     ): RawVisionDetection {
+        // Stateless per-frame clustering prevents stale prototype bloat (100+ types) and keeps scans <30ms
+        prototypeBank.clear()
         val origW = bitmap.width
         val origH = bitmap.height
         val workW = 540
@@ -151,6 +153,7 @@ class BoardVisionAnalyzer(
                 creamIntegral = creamIntegral,
                 edgeIntegral = edgeIntegral,
                 nonBgIntegral = nonBgIntegral,
+                darkCardIntegral = darkCardIntegral,
                 lumaGrid = lumaGrid,
                 workW = workW,
                 workH = workH,
@@ -405,6 +408,7 @@ class BoardVisionAnalyzer(
         creamIntegral: IntArray,
         edgeIntegral: IntArray,
         nonBgIntegral: IntArray,
+        darkCardIntegral: IntArray,
         lumaGrid: FloatArray,
         workW: Int,
         workH: Int,
@@ -421,6 +425,12 @@ class BoardVisionAnalyzer(
         val rimH = (tileH * 0.13f).roundToInt().coerceAtLeast(3)
         val insetX = (tileW * 0.16f).roundToInt()
         val insetY = (tileH * 0.15f).roundToInt()
+        val cInL = (tileW * 0.08f).roundToInt()
+        val cInR = (tileW * 0.24f).roundToInt()
+        val cInT = (tileH * 0.07f).roundToInt()
+        val cInB = (tileH * 0.23f).roundToInt()
+        val cLowT = (tileH * 0.66f).roundToInt()
+        val cLowB = (tileH * 0.82f).roundToInt()
         val raw = mutableListOf<CandidateBox>()
 
         val step = 3
@@ -429,7 +439,7 @@ class BoardVisionAnalyzer(
             var x = bLeft
             while (x <= bRight - tileW) {
                 val topRim = rectMean(creamIntegral, stride, x, y, x + tileW, y + rimH)
-                if (topRim >= 0.34f) {
+                if (topRim >= 0.36f) {
                     val leftRim = rectMean(creamIntegral, stride, x, y, x + rimW, y + tileH - rimH)
                     val rightRim = rectMean(creamIntegral, stride, x + tileW - rimW, y, x + tileW, y + tileH - rimH)
                     val totalCream = rectMean(creamIntegral, stride, x, y, x + tileW, y + tileH)
@@ -442,33 +452,54 @@ class BoardVisionAnalyzer(
                         x + tileW - insetX,
                         y + tileH - insetY,
                     )
-                    // 3D card lighting: bright top/left cream bevel, shaded right bevel, rich icon edges, non-desert core
-                    if (leftRim >= 0.28f && rightRim >= 0.12f && totalCream in 0.14f..0.84f && nonBg >= 0.62f && innerEdge >= 0.18f) {
-                        val normRect = RectF(
-                            x.toFloat() / workW,
-                            y.toFloat() / workH,
-                            (x + tileW).toFloat() / workW,
-                            (y + tileH).toFloat() / workH,
+                    if (leftRim >= 0.30f && rightRim >= 0.12f && totalCream in 0.16f..0.84f && nonBg >= 0.64f && innerEdge >= 0.18f) {
+                        // Own-card interior dark ratio & corner cream check: cleanly separates unlocked tiles from darkened underneath tiles
+                        val darkRatio = rectMean(
+                            darkCardIntegral,
+                            stride,
+                            x + cInL,
+                            y + cInT,
+                            x + tileW - cInL,
+                            y + cLowB,
                         )
-                        if (!BotDiagnosticLog.isBlacklisted(normRect)) {
-                            val rimScore = topRim * 0.36f + leftRim * 0.30f + rightRim * 0.16f + innerEdge * 0.45f
-                            val cx = x + tileW / 2
-                            val cy = y + tileH / 2
-                            val luma = rectLumaMean(lumaGrid, workW, x, y, x + tileW, y + tileH)
-                            // Side draw stacks sit in [sideStackY .. 0.685*H] at far left/right; Return-3 staging row sits > 0.69*H
-                            val isSide = (cy in sideStackY..(0.685f * workH).roundToInt()) && (cx < (workW * 0.34f) || cx > (workW * 0.66f))
-                            raw.add(
-                                CandidateBox(
-                                    x = x,
-                                    y = y,
-                                    w = tileW,
-                                    h = tileH,
-                                    score = rimScore,
-                                    luminance = luma,
-                                    isUnlocked = true,
-                                    isSideStack = isSide,
-                                ),
-                            )
+                        if (darkRatio <= 0.24f) {
+                            val tl = rectMean(creamIntegral, stride, x + cInL, y + cInT, x + cInR, y + cInB)
+                            val tr = rectMean(creamIntegral, stride, x + tileW - cInR, y + cInT, x + tileW - cInL, y + cInB)
+                            val bl = rectMean(creamIntegral, stride, x + cInL, y + cLowT, x + cInR, y + cLowB)
+                            val br = rectMean(creamIntegral, stride, x + tileW - cInR, y + cLowT, x + tileW - cInL, y + cLowB)
+                            val brightCorners = (if (tl >= 0.42f) 1 else 0) +
+                                (if (tr >= 0.42f) 1 else 0) +
+                                (if (bl >= 0.42f) 1 else 0) +
+                                (if (br >= 0.42f) 1 else 0)
+
+                            if (brightCorners >= 2 && (tl + bl) >= 0.85f) {
+                                val normRect = RectF(
+                                    x.toFloat() / workW,
+                                    y.toFloat() / workH,
+                                    (x + tileW).toFloat() / workW,
+                                    (y + tileH).toFloat() / workH,
+                                )
+                                if (!BotDiagnosticLog.isBlacklisted(normRect)) {
+                                    val rimScore = topRim * 0.34f + leftRim * 0.28f + rightRim * 0.14f +
+                                        innerEdge * 0.40f + (tl + bl) * 0.15f - darkRatio * 0.50f
+                                    val cx = x + tileW / 2
+                                    val cy = y + tileH / 2
+                                    val luma = rectLumaMean(lumaGrid, workW, x, y, x + tileW, y + tileH)
+                                    val isSide = (cy in sideStackY..(0.685f * workH).roundToInt()) && (cx < (workW * 0.34f) || cx > (workW * 0.66f))
+                                    raw.add(
+                                        CandidateBox(
+                                            x = x,
+                                            y = y,
+                                            w = tileW,
+                                            h = tileH,
+                                            score = rimScore,
+                                            luminance = luma,
+                                            isUnlocked = true,
+                                            isSideStack = isSide,
+                                        ),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -477,7 +508,7 @@ class BoardVisionAnalyzer(
             y += step
         }
 
-        return nonMaxSuppression(raw, minDistX = tileW * 0.62f, minDistY = tileH * 0.62f)
+        return nonMaxSuppression(raw, minDistX = tileW * 0.82f, minDistY = tileH * 0.80f)
     }
 
     private fun findLockedCandidates(
@@ -579,11 +610,16 @@ class BoardVisionAnalyzer(
         for (i in 0 until 7) {
             val sx0 = (tLeft + i * slotW + slotW * 0.05f).roundToInt().coerceIn(0, workW - 2)
             val sx1 = (tLeft + (i + 1) * slotW - slotW * 0.05f).roundToInt().coerceIn(sx0 + 1, workW)
-            // Tray sits inside dark wooden dock: any cream or vivid card border (luma >= 0.65) reliably marks occupancy
+            // Find exact cream card bounding box inside slot so wooden dock lip doesn't corrupt icon patch
             var brightHits = 0
             var totalSamples = 0
+            var minCardX = sx1
+            var maxCardX = sx0
+            var minCardY = tBottom
+            var maxCardY = tTop
             for (ty in tTop until tBottom) {
                 val rowOff = ty * workW
+                var rowBright = 0
                 for (tx in sx0 until sx1) {
                     totalSamples++
                     val c = pixels[rowOff + tx]
@@ -591,13 +627,20 @@ class BoardVisionAnalyzer(
                     val g = (c shr 8) and 0xFF
                     val b = c and 0xFF
                     val luma = (0.299f * r + 0.587f * g + 0.114f * b) / 255f
-                    if (r >= 198 && g >= 158 && b >= 108 && luma >= 0.66f) {
+                    if (r >= 205 && g >= 165 && b >= 115 && luma >= 0.70f) {
                         brightHits++
+                        rowBright++
+                        if (tx < minCardX) minCardX = tx
+                        if (tx > maxCardX) maxCardX = tx
                     }
+                }
+                if (rowBright >= ((sx1 - sx0) * 0.25f).roundToInt()) {
+                    if (ty < minCardY) minCardY = ty
+                    if (ty > maxCardY) maxCardY = ty
                 }
             }
             val brightDensity = if (totalSamples > 0) brightHits.toFloat() / totalSamples else 0f
-            val occupied = brightDensity >= 0.18f
+            val occupied = brightDensity >= 0.16f
 
             val normBounds = RectF(
                 sx0.toFloat() / workW,
@@ -607,16 +650,30 @@ class BoardVisionAnalyzer(
             )
 
             if (occupied) {
-                val insetW = ((sx1 - sx0) * 0.08f).roundToInt()
-                val insetH = ((tBottom - tTop) * 0.06f).roundToInt()
+                // Tighten crop to the card face itself (matches board tile framing 1:1)
+                val slotCenterX = (sx0 + sx1) / 2
+                val idealW = ((sx1 - sx0) * 0.84f).roundToInt().coerceAtLeast(16)
+                val cardL = if (maxCardX - minCardX >= idealW / 2) {
+                    val detectedCx = (minCardX + maxCardX) / 2
+                    val blendedCx = (detectedCx + slotCenterX) / 2
+                    (blendedCx - idealW / 2).coerceIn(sx0, sx1 - idealW)
+                } else {
+                    (slotCenterX - idealW / 2).coerceIn(sx0, sx1 - idealW)
+                }
+                val cardR = (cardL + idealW).coerceAtMost(sx1)
+                val cardT = if (maxCardY > minCardY + 20) minCardY else (tTop + (tBottom - tTop) * 0.16f).roundToInt()
+                val idealH = (idealW * 1.07f).roundToInt()
+                val detectedB = if (maxCardY > minCardY + 20) maxCardY + 1 else (tBottom - (tBottom - tTop) * 0.16f).roundToInt()
+                val cardB = max(detectedB, cardT + idealH).coerceAtMost(tBottom)
+
                 val patch = TilePrototypeBank.extractPatch(
                     pixels = pixels,
                     imgW = workW,
                     imgH = workH,
-                    boxLeft = (sx0 + insetW).coerceIn(0, workW - 2),
-                    boxTop = (tTop + insetH).coerceIn(0, workH - 2),
-                    boxRight = (sx1 - insetW).coerceIn(sx0 + 2, workW),
-                    boxBottom = (tBottom - insetH).coerceIn(tTop + 2, workH),
+                    boxLeft = cardL,
+                    boxTop = cardT,
+                    boxRight = cardR,
+                    boxBottom = cardB,
                     occludedMask = null,
                 )
                 val (typeId, _) = prototypeBank.matchOrRegisterUnoccluded(patch)

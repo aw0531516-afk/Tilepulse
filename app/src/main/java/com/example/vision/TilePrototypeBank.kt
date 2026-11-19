@@ -43,31 +43,43 @@ class TilePrototypeBank {
     }
 
     /**
-     * Matches an unoccluded icon patch against known prototypes or registers a new prototype.
+     * Matches an unoccluded icon patch against known prototypes using +/-1 grid cell shift alignment
+     * and chromatic hue guards, or registers a new prototype if no clean match exists.
      */
-    fun matchOrRegisterUnoccluded(patch: IconPatch, threshold: Float = 0.77f): Pair<Int, Float> {
+    fun matchOrRegisterUnoccluded(patch: IconPatch, threshold: Float = 0.785f): Pair<Int, Float> {
         var bestId = -1
         var bestSim = -1f
 
         for (proto in prototypes) {
-            val sim = maskedCosineSimilarity(patch, proto)
-            if (sim > bestSim) {
-                bestSim = sim
+            // Try micro-shifts (-1..1 in x, y) so 3px box-step or tray-vs-board crop offsets match cleanly
+            var maxShiftSim = -1f
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    val sim = shiftedSimilarity(patch, proto, dx, dy)
+                    if (sim > maxShiftSim) {
+                        maxShiftSim = sim
+                    }
+                }
+            }
+            if (maxShiftSim > bestSim) {
+                bestSim = maxShiftSim
                 bestId = proto.typeId
             }
         }
 
         if (bestId != -1 && bestSim >= threshold) {
             val proto = prototypes[bestId]
-            // Gentle exponential moving average update for unoccluded samples
-            val alpha = 1f / (proto.sampleCount + 1).coerceAtMost(8)
-            for (i in 0 until IconPatch.PATCH_SIZE) {
-                proto.gridR[i] = proto.gridR[i] * (1f - alpha) + patch.gridR[i] * alpha
-                proto.gridG[i] = proto.gridG[i] * (1f - alpha) + patch.gridG[i] * alpha
-                proto.gridB[i] = proto.gridB[i] * (1f - alpha) + patch.gridB[i] * alpha
-                proto.gridEdge[i] = proto.gridEdge[i] * (1f - alpha) + patch.gridEdge[i] * alpha
+            // Gentle exponential moving average update only on zero-shift high-confidence matches
+            if (shiftedSimilarity(patch, proto, 0, 0) >= threshold) {
+                val alpha = 1f / (proto.sampleCount + 1).coerceAtMost(8)
+                for (i in 0 until IconPatch.PATCH_SIZE) {
+                    proto.gridR[i] = proto.gridR[i] * (1f - alpha) + patch.gridR[i] * alpha
+                    proto.gridG[i] = proto.gridG[i] * (1f - alpha) + patch.gridG[i] * alpha
+                    proto.gridB[i] = proto.gridB[i] * (1f - alpha) + patch.gridB[i] * alpha
+                    proto.gridEdge[i] = proto.gridEdge[i] * (1f - alpha) + patch.gridEdge[i] * alpha
+                }
+                proto.sampleCount++
             }
-            proto.sampleCount++
             return bestId to bestSim
         }
 
@@ -90,7 +102,7 @@ class TilePrototypeBank {
      * Matches a partially occluded lower-layer tile ONLY across its unoccluded visible cells.
      * Never registers a new prototype from an occluded tile.
      */
-    fun matchOccluded(patch: IconPatch, minVisibleFraction: Float = 0.30f, threshold: Float = 0.70f): Pair<Int, Float> {
+    fun matchOccluded(patch: IconPatch, minVisibleFraction: Float = 0.30f, threshold: Float = 0.72f): Pair<Int, Float> {
         val minCells = (IconPatch.PATCH_SIZE * minVisibleFraction).toInt()
         if (patch.visibleCount < minCells || prototypes.isEmpty()) {
             return -1 to 0f
@@ -101,7 +113,7 @@ class TilePrototypeBank {
         var secondSim = -1f
 
         for (proto in prototypes) {
-            val sim = maskedCosineSimilarity(patch, proto)
+            val sim = shiftedSimilarity(patch, proto, 0, 0)
             if (sim > bestSim) {
                 secondSim = bestSim
                 bestSim = sim
@@ -123,47 +135,70 @@ class TilePrototypeBank {
         return prototypes.getOrNull(typeId)?.representativeColor ?: Color.GRAY
     }
 
-    /**
-     * Computes illumination-invariant (zero-mean, L2-normalized over visible cells) cosine similarity
-     * across RGB channels + edge gradient channel.
-     */
-    private fun maskedCosineSimilarity(patch: IconPatch, proto: Prototype): Float {
+    private fun shiftedSimilarity(patch: IconPatch, proto: Prototype, dx: Int, dy: Int): Float {
+        val dim = IconPatch.PATCH_DIM
         var count = 0
         var sumPR = 0f; var sumPG = 0f; var sumPB = 0f; var sumPE = 0f
         var sumQR = 0f; var sumQG = 0f; var sumQB = 0f; var sumQE = 0f
 
-        for (i in 0 until IconPatch.PATCH_SIZE) {
-            if (!patch.visibleCells[i]) continue
-            count++
-            sumPR += patch.gridR[i]; sumPG += patch.gridG[i]; sumPB += patch.gridB[i]; sumPE += patch.gridEdge[i]
-            sumQR += proto.gridR[i]; sumQG += proto.gridG[i]; sumQB += proto.gridB[i]; sumQE += proto.gridEdge[i]
+        for (py in 0 until dim) {
+            val qy = py + dy
+            if (qy !in 0 until dim) continue
+            for (px in 0 until dim) {
+                val qx = px + dx
+                if (qx !in 0 until dim) continue
+                val pi = py * dim + px
+                if (!patch.visibleCells[pi]) continue
+                val qi = qy * dim + qx
+                count++
+                sumPR += patch.gridR[pi]; sumPG += patch.gridG[pi]; sumPB += patch.gridB[pi]; sumPE += patch.gridEdge[pi]
+                sumQR += proto.gridR[qi]; sumQG += proto.gridG[qi]; sumQB += proto.gridB[qi]; sumQE += proto.gridEdge[qi]
+            }
         }
-        if (count < 12) return 0f
+        if (count < 16) return 0f
 
         val meanPR = sumPR / count; val meanPG = sumPG / count; val meanPB = sumPB / count; val meanPE = sumPE / count
         val meanQR = sumQR / count; val meanQG = sumQG / count; val meanQB = sumQB / count; val meanQE = sumQE / count
 
         var dotColor = 0f; var normPColor = 0f; var normQColor = 0f
         var dotEdge = 0f; var normPEdge = 0f; var normQEdge = 0f
+        var hueDot = 0f; var hueNP = 0f; var hueNQ = 0f
 
-        for (i in 0 until IconPatch.PATCH_SIZE) {
-            if (!patch.visibleCells[i]) continue
-            val pr = patch.gridR[i] - meanPR
-            val pg = patch.gridG[i] - meanPG
-            val pb = patch.gridB[i] - meanPB
-            val qr = proto.gridR[i] - meanQR
-            val qg = proto.gridG[i] - meanQG
-            val qb = proto.gridB[i] - meanQB
+        for (py in 0 until dim) {
+            val qy = py + dy
+            if (qy !in 0 until dim) continue
+            for (px in 0 until dim) {
+                val qx = px + dx
+                if (qx !in 0 until dim) continue
+                val pi = py * dim + px
+                if (!patch.visibleCells[pi]) continue
+                val qi = qy * dim + qx
 
-            dotColor += pr * qr + pg * qg + pb * qb
-            normPColor += pr * pr + pg * pg + pb * pb
-            normQColor += qr * qr + qg * qg + qb * qb
+                val pr = patch.gridR[pi] - meanPR
+                val pg = patch.gridG[pi] - meanPG
+                val pb = patch.gridB[pi] - meanPB
+                val qr = proto.gridR[qi] - meanQR
+                val qg = proto.gridG[qi] - meanQG
+                val qb = proto.gridB[qi] - meanQB
 
-            val pe = patch.gridEdge[i] - meanPE
-            val qe = proto.gridEdge[i] - meanQE
-            dotEdge += pe * qe
-            normPEdge += pe * pe
-            normQEdge += qe * qe
+                dotColor += pr * qr + pg * qg + pb * qb
+                normPColor += pr * pr + pg * pg + pb * pb
+                normQColor += qr * qr + qg * qg + qb * qb
+
+                val pe = patch.gridEdge[pi] - meanPE
+                val qe = proto.gridEdge[qi] - meanQE
+                dotEdge += pe * qe
+                normPEdge += pe * pe
+                normQEdge += qe * qe
+
+                val prg = patch.gridR[pi] - patch.gridG[pi]
+                val pby = patch.gridB[pi] - 0.5f * (patch.gridR[pi] + patch.gridG[pi])
+                val qrg = proto.gridR[qi] - proto.gridG[qi]
+                val qby = proto.gridB[qi] - 0.5f * (proto.gridR[qi] + proto.gridG[qi])
+                hueDot += prg * qrg + pby * qby
+                hueNP += prg * prg + pby * pby
+                hueNQ += qrg * qrg + qby * qby
+            }
         }
 
         val colorSim = if (normPColor > 1e-5f && normQColor > 1e-5f) {
@@ -174,33 +209,21 @@ class TilePrototypeBank {
             dotEdge / (sqrt(normPEdge) * sqrt(normQEdge))
         } else 0f
 
-        // Also check absolute hue-ratio consistency so red strawberry vs green cucumber never collide
-        val hueConsistency = computeVisibleHueConsistency(patch, proto)
-        return (0.62f * colorSim + 0.23f * edgeSim + 0.15f * hueConsistency).coerceIn(-1f, 1f)
-    }
-
-    private fun computeVisibleHueConsistency(patch: IconPatch, proto: Prototype): Float {
-        var dot = 0f
-        var np = 0f
-        var nq = 0f
-        for (i in 0 until IconPatch.PATCH_SIZE) {
-            if (!patch.visibleCells[i]) continue
-            // Chromatic opponent channels (R-G) and (2B - R - G) are invariant to shadow darkening
-            val prg = patch.gridR[i] - patch.gridG[i]
-            val pby = patch.gridB[i] - 0.5f * (patch.gridR[i] + patch.gridG[i])
-            val qrg = proto.gridR[i] - proto.gridG[i]
-            val qby = proto.gridB[i] - 0.5f * (proto.gridR[i] + proto.gridG[i])
-            dot += prg * qrg + pby * qby
-            np += prg * prg + pby * pby
-            nq += qrg * qrg + qby * qby
-        }
-        return if (np > 1e-5f && nq > 1e-5f) {
-            dot / (sqrt(np) * sqrt(nq))
+        val hueSim = if (hueNP > 1e-5f && hueNQ > 1e-5f) {
+            hueDot / (sqrt(hueNP) * sqrt(hueNQ))
         } else {
-            // Neutral-colored tiles (e.g., cauliflower / rice)
-            val diff = abs(np - nq)
+            val diff = abs(hueNP - hueNQ)
             if (diff < 0.08f) 0.7f else 0.1f
         }
+
+        // Strict chromatic guard: differently colored saturated icons (e.g., green cucumber vs red strawberry) cannot collide
+        if (hueNP > 0.16f && hueNQ > 0.16f && hueSim < 0.50f) {
+            return 0f
+        }
+
+        // Penalize large spatial shifts gently so zero-shift exact alignments win over shifted false positives
+        val shiftPenalty = (abs(dx) + abs(dy)) * 0.015f
+        return (0.56f * colorSim + 0.24f * edgeSim + 0.20f * hueSim - shiftPenalty).coerceIn(-1f, 1f)
     }
 
     companion object {
@@ -259,7 +282,6 @@ class TilePrototypeBank {
                             sumG += g / 255f
                             sumB += b / 255f
 
-                            // Simple fast gradient magnitude against right/bottom neighbor
                             val cr = if (x + 1 < imgW) pixels[idx + 1] else c
                             val cb = if (y + 1 < imgH) pixels[idx + imgW] else c
                             val lum = 0.3f * r + 0.59f * g + 0.11f * b
