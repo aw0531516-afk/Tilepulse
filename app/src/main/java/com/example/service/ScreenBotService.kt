@@ -76,6 +76,8 @@ class ScreenBotService : Service() {
     private var autoPlayJob: Job? = null
     @Volatile
     private var isAutoPlaying = false
+    @Volatile
+    private var isForegroundStarted = false
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -94,7 +96,22 @@ class ScreenBotService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent == null || intent.action == ACTION_STOP) {
+            stopSelfSafely()
+            return START_NOT_STICKY
+        }
+
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_RESULT_DATA)
+        }
+
+        val hasValidToken = resultCode == Activity.RESULT_OK && resultData != null
+        if (mediaProjection == null && !hasValidToken) {
+            // Never start a mediaProjection FGS without an active MediaProjection consent token
             stopSelfSafely()
             return START_NOT_STICKY
         }
@@ -109,17 +126,9 @@ class ScreenBotService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        isForegroundStarted = true
 
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
-            ?: Activity.RESULT_CANCELED
-        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent?.getParcelableExtra(EXTRA_RESULT_DATA)
-        }
-
-        if (resultCode == Activity.RESULT_OK && resultData != null && mediaProjection == null) {
+        if (hasValidToken && mediaProjection == null && resultData != null) {
             setupMediaProjection(resultCode, resultData)
         }
 
@@ -136,7 +145,7 @@ class ScreenBotService : Service() {
             action = "Floating board ready. Open your game & tap PLAY.",
         )
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun setupMediaProjection(resultCode: Int, data: Intent) {
@@ -166,8 +175,8 @@ class ScreenBotService : Service() {
         serviceScope.launch {
             BotStateBridge.commands.collect { cmd ->
                 when (cmd) {
-                    BotCommand.TOGGLE_AUTO_PLAY -> toggleAutoPlay()
-                    BotCommand.PAUSE_BOT -> pauseAutoPlay()
+                    BotCommand.TOGGLE_AUTO_PLAY -> withContext(Dispatchers.Main) { toggleAutoPlay() }
+                    BotCommand.PAUSE_BOT -> withContext(Dispatchers.Main) { pauseAutoPlay() }
                     BotCommand.STEP_ONCE -> executeSingleStep()
                     BotCommand.RESCAN_NOW -> analyzeOnceAndPreview()
                     BotCommand.STOP_SERVICE -> withContext(Dispatchers.Main) { stopSelfSafely() }
@@ -549,6 +558,10 @@ class ScreenBotService : Service() {
     }
 
     private fun updateHudUi() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { updateHudUi() }
+            return
+        }
         val telemetry = BotStateBridge.telemetry.value
         val analysis = telemetry.lastAnalysis
         val trayCount = analysis?.trayOccupiedCount ?: 0
@@ -574,10 +587,21 @@ class ScreenBotService : Service() {
     private fun stopSelfSafely() {
         isAutoPlaying = false
         autoPlayJob?.cancel()
-        hudView?.let { runCatching { windowManager.removeView(it) } }
-        moveOverlayView?.let { runCatching { windowManager.removeView(it) } }
-        hudView = null
-        moveOverlayView = null
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            hudView?.let { runCatching { windowManager.removeView(it) } }
+            moveOverlayView?.let { runCatching { windowManager.removeView(it) } }
+            hudView = null
+            moveOverlayView = null
+        } else {
+            val h = hudView
+            val m = moveOverlayView
+            hudView = null
+            moveOverlayView = null
+            mainHandler.post {
+                h?.let { runCatching { windowManager.removeView(it) } }
+                m?.let { runCatching { windowManager.removeView(it) } }
+            }
+        }
 
         virtualDisplay?.release()
         virtualDisplay = null
@@ -592,7 +616,10 @@ class ScreenBotService : Service() {
             status = BotRuntimeStatus.IDLE,
             action = "Stopped",
         )
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        if (isForegroundStarted) {
+            isForegroundStarted = false
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
         stopSelf()
     }
 
