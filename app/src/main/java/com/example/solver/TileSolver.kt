@@ -76,7 +76,7 @@ class TileSolver {
                 tapX = t.tapX,
                 tapY = t.tapY,
                 normTapX = (t.normBounds.left + t.normBounds.right) * 0.5f,
-                normTapY = (t.normBounds.top + t.normBounds.bottom) * 0.48f,
+                normTapY = t.normBounds.top + (t.normBounds.bottom - t.normBounds.top) * 0.48f,
             )
         }
 

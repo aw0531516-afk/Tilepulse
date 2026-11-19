@@ -2,6 +2,7 @@ package com.example.vision
 
 import android.graphics.Bitmap
 import android.graphics.RectF
+import com.example.data.BotDiagnosticLog
 import com.example.model.DetectedTile
 import com.example.model.RoiCalibration
 import com.example.model.TraySlot
@@ -54,8 +55,7 @@ class BoardVisionAnalyzer(
         val scaleX = origW.toFloat() / workW
         val scaleY = origH.toFloat() / workH
 
-        // 0. Guard: verify we are actually looking at the puzzle game (desert margins + wooden 7-slot dock),
-        // never Android Home Screen, launcher icons, or other apps.
+        // 0. Guard: verify we are actually looking at the puzzle game (desert margins + wooden 7-slot dock)
         if (!isGameScreenPresent(pixels, workW, workH, roi)) {
             return RawVisionDetection(
                 imageWidth = origW,
@@ -66,8 +66,9 @@ class BoardVisionAnalyzer(
             )
         }
 
-        // Precompute pixel masks and integral images for O(1) rectangular density queries
+        // Precompute pixel masks and integral images for O(1) rectangular density & edge queries
         val creamIntegral = IntArray((workW + 1) * (workH + 1))
+        val edgeIntegral = IntArray((workW + 1) * (workH + 1))
         val nonBgIntegral = IntArray((workW + 1) * (workH + 1))
         val darkCardIntegral = IntArray((workW + 1) * (workH + 1))
         val lumaGrid = FloatArray(workW * workH)
@@ -75,6 +76,7 @@ class BoardVisionAnalyzer(
         val stride = workW + 1
         for (y in 0 until workH) {
             var rowCream = 0
+            var rowEdge = 0
             var rowNonBg = 0
             var rowDark = 0
             val pyOff = y * workW
@@ -92,36 +94,45 @@ class BoardVisionAnalyzer(
                 lumaGrid[pyOff + x] = luma
                 val sat = if (maxC == 0) 0f else (maxC - minC) / maxC.toFloat()
 
-                // Unlocked cream card background: warm bright ivory/cream (calibrated to real game pixels)
+                // Unlocked cream card border/surface: strictly brighter than sunlit desert sand
                 val isCream = (
-                    r >= 200 && g >= 165 && b >= 115 &&
+                    r >= 215 && g >= 176 && b >= 122 &&
                         r >= g - 10 && g >= b - 10 &&
                         (maxC - minC) <= 118 &&
-                        luma >= 0.70f
+                        luma >= 0.735f
                     )
-                // Desert sandy background: warm orange-tan with noticeably lower luma and high R-B spread
+                // Desert sandy background (expanded upper bound to cover sunlit central sand)
                 val isDesertBg = (
-                    r in 135..220 && g in 88..165 && b in 40..115 &&
-                        (r - b) >= 62 && sat >= 0.44f && luma in 0.36f..0.68f
+                    r in 135..230 && g in 88..180 && b in 40..130 &&
+                        (r - b) >= 56 && sat >= 0.39f && luma in 0.36f..0.73f
                     )
-                // Darkened locked card surface underneath upper tiles (lower R-B spread than desert sand)
+                // Darkened locked card surface underneath upper tiles
                 val isDarkCard = (
                     !isCream && !isDesertBg &&
                         luma in 0.16f..0.54f &&
                         (r - b) <= 60 && sat <= 0.48f
                     )
 
+                // Strong edge pixel (food icon contours & tile bevels; empty sand has near-zero edges)
+                val cr = if (x + 1 < workW) pixels[pyOff + x + 1] else c
+                val cb = if (y + 1 < workH) pixels[pyOff + workW + x] else c
+                val lumR = (0.299f * ((cr shr 16) and 0xFF) + 0.587f * ((cr shr 8) and 0xFF) + 0.114f * (cr and 0xFF)) / 255f
+                val lumB = (0.299f * ((cb shr 16) and 0xFF) + 0.587f * ((cb shr 8) and 0xFF) + 0.114f * (cb and 0xFF)) / 255f
+                val isStrongEdge = (abs(luma - lumR) + abs(luma - lumB)) >= 0.085f
+
                 if (isCream) rowCream++
+                if (isStrongEdge) rowEdge++
                 if (!isDesertBg) rowNonBg++
                 if (isDarkCard) rowDark++
 
                 creamIntegral[iOff + x + 1] = creamIntegral[pOff + x + 1] + rowCream
+                edgeIntegral[iOff + x + 1] = edgeIntegral[pOff + x + 1] + rowEdge
                 nonBgIntegral[iOff + x + 1] = nonBgIntegral[pOff + x + 1] + rowNonBg
                 darkCardIntegral[iOff + x + 1] = darkCardIntegral[pOff + x + 1] + rowDark
             }
         }
 
-        // Try candidate tile widths (handles both 6-column and 7-column boards cleanly)
+        // Try candidate tile widths (handles 6-column and 7-column boards cleanly)
         val candidateRatios = listOf(0.104f, 0.111f, roi.tileWidthRatio).distinct()
         var bestTileW = (roi.tileWidthRatio * workW).roundToInt().coerceIn(28, 120)
         var bestTileH = (bestTileW * 1.07f).roundToInt()
@@ -138,9 +149,11 @@ class BoardVisionAnalyzer(
 
             val found = findUnlockedCandidates(
                 creamIntegral = creamIntegral,
+                edgeIntegral = edgeIntegral,
                 nonBgIntegral = nonBgIntegral,
                 lumaGrid = lumaGrid,
                 workW = workW,
+                workH = workH,
                 bLeft = bLeft,
                 bTop = bTop,
                 bRight = bRight,
@@ -161,8 +174,7 @@ class BoardVisionAnalyzer(
         val bLeft = (roi.boardLeft * workW).roundToInt().coerceIn(0, workW - tileW - 1)
         val bRight = (roi.boardRight * workW).roundToInt().coerceIn(bLeft + tileW + 1, workW)
         val bTop = (roi.boardTop * workH).roundToInt().coerceIn(0, workH - tileH - 1)
-        val bBottom = (roi.boardBottom * workH).roundToInt().coerceIn(bTop + tileH + 1, workH)
-        val sideStackY = (roi.sideStackTop * workH).roundToInt().coerceIn(bTop, bBottom)
+        val sideStackY = (roi.sideStackTop * workH).roundToInt().coerceIn(bTop, workH)
 
         // Build occlusion mask covering all unlocked tiles
         val unlockedOcclusionMask = BooleanArray(workW * workH)
@@ -182,6 +194,7 @@ class BoardVisionAnalyzer(
         // 2. Detect Locked Underneath Tiles in unclaimed dark-card areas overlapping upper tiles
         val lockedCandidates = findLockedCandidates(
             darkCardIntegral = darkCardIntegral,
+            edgeIntegral = edgeIntegral,
             unlockedMask = unlockedOcclusionMask,
             unlockedBoxes = unlockedCandidates,
             lumaGrid = lumaGrid,
@@ -194,7 +207,6 @@ class BoardVisionAnalyzer(
             tileH = tileH,
         )
 
-        // Combine & sort descending by luminance so DAG parents come before children
         val allCandidates = (unlockedCandidates + lockedCandidates)
             .sortedWith(compareByDescending<CandidateBox> { it.isUnlocked }.thenByDescending { it.luminance })
             .take(250)
@@ -331,11 +343,6 @@ class BoardVisionAnalyzer(
         )
     }
 
-    /**
-     * Confirms the foreground screen is actually the 3-tile desert puzzle game by checking:
-     * 1) Warm sandy desert margins at left/right edges of the board, and
-     * 2) Warm wooden brown dock frame or cream tray tiles in the 7-slot dock band.
-     */
     private fun isGameScreenPresent(
         pixels: IntArray,
         workW: Int,
@@ -366,7 +373,6 @@ class BoardVisionAnalyzer(
         val desertRatio = if (desertSamples > 0) desertHits.toFloat() / desertSamples else 0f
         if (desertRatio < 0.60f) return false
 
-        // Also check wooden dock frame / slots along tray band
         val trayFrameY = ((roi.trayTop + 0.004f) * workH).roundToInt().coerceIn(0, workH - 1)
         val trayMidY = (((roi.trayTop + roi.trayBottom) * 0.5f) * workH).roundToInt().coerceIn(0, workH - 1)
         var trayHits = 0
@@ -391,15 +397,17 @@ class BoardVisionAnalyzer(
         val g = (c shr 8) and 0xFF
         val b = c and 0xFF
         val isWood = (r in 85..185 && g in 45..135 && b in 25..95 && r > g && g > b && (r - b) >= 35)
-        val isTrayCream = (r >= 195 && g >= 160 && b >= 110 && (r - b) <= 118)
+        val isTrayCream = (r >= 205 && g >= 165 && b >= 115 && (r - b) <= 118)
         return isWood || isTrayCream
     }
 
     private fun findUnlockedCandidates(
         creamIntegral: IntArray,
+        edgeIntegral: IntArray,
         nonBgIntegral: IntArray,
         lumaGrid: FloatArray,
         workW: Int,
+        workH: Int,
         bLeft: Int,
         bTop: Int,
         bRight: Int,
@@ -411,6 +419,8 @@ class BoardVisionAnalyzer(
         val stride = workW + 1
         val rimW = (tileW * 0.14f).roundToInt().coerceAtLeast(3)
         val rimH = (tileH * 0.13f).roundToInt().coerceAtLeast(3)
+        val insetX = (tileW * 0.16f).roundToInt()
+        val insetY = (tileH * 0.15f).roundToInt()
         val raw = mutableListOf<CandidateBox>()
 
         val step = 3
@@ -419,29 +429,47 @@ class BoardVisionAnalyzer(
             var x = bLeft
             while (x <= bRight - tileW) {
                 val topRim = rectMean(creamIntegral, stride, x, y, x + tileW, y + rimH)
-                if (topRim >= 0.44f) {
+                if (topRim >= 0.34f) {
                     val leftRim = rectMean(creamIntegral, stride, x, y, x + rimW, y + tileH - rimH)
                     val rightRim = rectMean(creamIntegral, stride, x + tileW - rimW, y, x + tileW, y + tileH - rimH)
                     val totalCream = rectMean(creamIntegral, stride, x, y, x + tileW, y + tileH)
                     val nonBg = rectMean(nonBgIntegral, stride, x, y, x + tileW, y + tileH)
-                    if (leftRim >= 0.36f && rightRim >= 0.36f && nonBg >= 0.80f && totalCream in 0.24f..0.90f) {
-                        val rimScore = topRim * 0.35f + leftRim * 0.32f + rightRim * 0.33f
-                        val cx = x + tileW / 2
-                        val cy = y + tileH / 2
-                        val luma = rectLumaMean(lumaGrid, workW, x, y, x + tileW, y + tileH)
-                        val isSide = (cy >= sideStackY) && (cx < (workW * 0.34f) || cx > (workW * 0.66f))
-                        raw.add(
-                            CandidateBox(
-                                x = x,
-                                y = y,
-                                w = tileW,
-                                h = tileH,
-                                score = rimScore + if (totalCream < 0.78f) 0.1f else 0f,
-                                luminance = luma,
-                                isUnlocked = true,
-                                isSideStack = isSide,
-                            ),
+                    val innerEdge = rectMean(
+                        edgeIntegral,
+                        stride,
+                        x + insetX,
+                        y + insetY,
+                        x + tileW - insetX,
+                        y + tileH - insetY,
+                    )
+                    // 3D card lighting: bright top/left cream bevel, shaded right bevel, rich icon edges, non-desert core
+                    if (leftRim >= 0.28f && rightRim >= 0.12f && totalCream in 0.14f..0.84f && nonBg >= 0.62f && innerEdge >= 0.18f) {
+                        val normRect = RectF(
+                            x.toFloat() / workW,
+                            y.toFloat() / workH,
+                            (x + tileW).toFloat() / workW,
+                            (y + tileH).toFloat() / workH,
                         )
+                        if (!BotDiagnosticLog.isBlacklisted(normRect)) {
+                            val rimScore = topRim * 0.36f + leftRim * 0.30f + rightRim * 0.16f + innerEdge * 0.45f
+                            val cx = x + tileW / 2
+                            val cy = y + tileH / 2
+                            val luma = rectLumaMean(lumaGrid, workW, x, y, x + tileW, y + tileH)
+                            // Side draw stacks sit in [sideStackY .. 0.685*H] at far left/right; Return-3 staging row sits > 0.69*H
+                            val isSide = (cy in sideStackY..(0.685f * workH).roundToInt()) && (cx < (workW * 0.34f) || cx > (workW * 0.66f))
+                            raw.add(
+                                CandidateBox(
+                                    x = x,
+                                    y = y,
+                                    w = tileW,
+                                    h = tileH,
+                                    score = rimScore,
+                                    luminance = luma,
+                                    isUnlocked = true,
+                                    isSideStack = isSide,
+                                ),
+                            )
+                        }
                     }
                 }
                 x += step
@@ -454,6 +482,7 @@ class BoardVisionAnalyzer(
 
     private fun findLockedCandidates(
         darkCardIntegral: IntArray,
+        edgeIntegral: IntArray,
         unlockedMask: BooleanArray,
         unlockedBoxes: List<CandidateBox>,
         lumaGrid: FloatArray,
@@ -475,7 +504,8 @@ class BoardVisionAnalyzer(
             var x = bLeft
             while (x <= bRight - tileW) {
                 val darkDensity = rectMean(darkCardIntegral, stride, x, y, x + tileW, y + tileH)
-                if (darkDensity >= 0.18f) {
+                val edgeDensity = rectMean(edgeIntegral, stride, x, y, x + tileW, y + tileH)
+                if (darkDensity >= 0.22f && edgeDensity >= 0.08f) {
                     var overlapsUnlocked = false
                     for (u in unlockedBoxes) {
                         val inter = intersectionArea(x, y, x + tileW, y + tileH, u.x, u.y, u.x + u.w, u.y + u.h)
@@ -501,7 +531,7 @@ class BoardVisionAnalyzer(
                         val unclaimedRatio = if (sampleCount > 0) unclaimed.toFloat() / sampleCount else 0f
                         if (unclaimedRatio in 0.18f..0.90f) {
                             val luma = rectLumaMean(lumaGrid, workW, x, y, x + tileW, y + tileH)
-                            val score = darkDensity * 0.7f + (1f - abs(unclaimedRatio - 0.50f)) * 0.3f
+                            val score = darkDensity * 0.65f + edgeDensity * 0.35f
                             raw.add(
                                 CandidateBox(
                                     x = x,
@@ -549,8 +579,25 @@ class BoardVisionAnalyzer(
         for (i in 0 until 7) {
             val sx0 = (tLeft + i * slotW + slotW * 0.05f).roundToInt().coerceIn(0, workW - 2)
             val sx1 = (tLeft + (i + 1) * slotW - slotW * 0.05f).roundToInt().coerceIn(sx0 + 1, workW)
-            val creamDensity = rectMean(creamIntegral, stride, sx0, tTop, sx1, tBottom)
-            val occupied = creamDensity >= 0.22f
+            // Tray sits inside dark wooden dock: any cream or vivid card border (luma >= 0.65) reliably marks occupancy
+            var brightHits = 0
+            var totalSamples = 0
+            for (ty in tTop until tBottom) {
+                val rowOff = ty * workW
+                for (tx in sx0 until sx1) {
+                    totalSamples++
+                    val c = pixels[rowOff + tx]
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    val luma = (0.299f * r + 0.587f * g + 0.114f * b) / 255f
+                    if (r >= 198 && g >= 158 && b >= 108 && luma >= 0.66f) {
+                        brightHits++
+                    }
+                }
+            }
+            val brightDensity = if (totalSamples > 0) brightHits.toFloat() / totalSamples else 0f
+            val occupied = brightDensity >= 0.18f
 
             val normBounds = RectF(
                 sx0.toFloat() / workW,

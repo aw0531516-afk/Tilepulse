@@ -29,7 +29,7 @@ class BotPreferencesRepository(private val context: Context) {
         val BOARD_LEFT = floatPreferencesKey("board_left")
         val BOARD_RIGHT = floatPreferencesKey("board_right")
         val BOARD_TOP = floatPreferencesKey("board_top")
-        val BOARD_BOTTOM = floatPreferencesKey("board_bottom")
+        val BOARD_BOTTOM = floatPreferencesKey("board_bottom_v2")
         val TRAY_TOP = floatPreferencesKey("tray_top")
         val TRAY_BOTTOM = floatPreferencesKey("tray_bottom")
         val TILE_WIDTH_RATIO = floatPreferencesKey("tile_width_ratio")

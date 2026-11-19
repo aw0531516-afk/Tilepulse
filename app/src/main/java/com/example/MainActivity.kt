@@ -2,6 +2,8 @@ package com.example
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -81,6 +84,7 @@ fun TileBotApp(viewModel: BotViewModel) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val calibration by viewModel.calibration.collectAsStateWithLifecycle()
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    val trainingMetrics by viewModel.trainingMetrics.collectAsStateWithLifecycle()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
@@ -195,6 +199,7 @@ fun TileBotApp(viewModel: BotViewModel) {
                     0 -> CockpitScreen(
                         telemetry = telemetry,
                         settings = settings,
+                        trainingMetrics = trainingMetrics,
                         onOpenAccessibilitySettings = {
                             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
@@ -209,6 +214,16 @@ fun TileBotApp(viewModel: BotViewModel) {
                         onLaunchFloatingBot = launchProjectionFlow,
                         onSendCommand = viewModel::sendBotCommand,
                         onUpdateSettings = viewModel::updateSettings,
+                        onCopyTrainingLog = {
+                            val report = viewModel.getShareableTrainingLog()
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("TilePulse Training Log", report))
+                            Toast.makeText(context, "Training log copied! Paste it in chat.", Toast.LENGTH_SHORT).show()
+                        },
+                        onResetTrainingMemory = {
+                            viewModel.resetTrainingMemory()
+                            Toast.makeText(context, "Self-training memory cleared.", Toast.LENGTH_SHORT).show()
+                        },
                     )
 
                     else -> CalibrationScreen(

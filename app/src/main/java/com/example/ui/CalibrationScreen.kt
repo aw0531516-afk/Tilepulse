@@ -84,7 +84,7 @@ fun CalibrationScreen(
                 RoiSliderRow(
                     label = "Board Bottom Y",
                     value = calibration.boardBottom,
-                    range = 0.50f..0.76f,
+                    range = 0.50f..0.80f,
                     onValueChange = { onUpdateCalibration(calibration.copy(boardBottom = it)) },
                 )
                 RoiSliderRow(

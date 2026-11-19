@@ -34,9 +34,11 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.data.BotDiagnosticLog
 import com.example.model.BoardAnalysisResult
 import com.example.model.BoosterType
 import com.example.model.BotRuntimeStatus
+import com.example.model.PlannedMove
 import com.example.solver.TileSolver
 import com.example.vision.BoardVisionAnalyzer
 import kotlinx.coroutines.CoroutineScope
@@ -204,6 +206,12 @@ class ScreenBotService : Service() {
         updateHudUi()
     }
 
+    private data class PendingVerification(
+        val move: PlannedMove,
+        val beforeTray: Int,
+        val beforeTiles: Int,
+    )
+
     private fun startAutoPlay() {
         if (TileBotAccessibilityService.current() == null) {
             BotStateBridge.setStatus(
@@ -225,13 +233,39 @@ class ScreenBotService : Service() {
 
         autoPlayJob?.cancel()
         autoPlayJob = serviceScope.launch {
+            var pendingVerification: PendingVerification? = null
+
             while (isActive && isAutoPlaying) {
                 val analysis = captureAndAnalyze()
                 if (analysis == null) {
-                    delay(280L)
+                    delay(260L)
                     continue
                 }
 
+                // Verify previous tap against live captured screen state (self-training feedback loop)
+                val pending = pendingVerification
+                if (pending != null) {
+                    pendingVerification = null
+                    val afterTray = analysis.trayOccupiedCount
+                    val afterTiles = analysis.tiles.size
+                    val verified = (afterTray != pending.beforeTray) || (afterTiles < pending.beforeTiles)
+                    BotDiagnosticLog.recordTapOutcome(
+                        move = pending.move,
+                        beforeTray = pending.beforeTray,
+                        afterTray = afterTray,
+                        beforeTiles = pending.beforeTiles,
+                        afterTiles = afterTiles,
+                    )
+                    if (!verified && analysis.tiles.isNotEmpty()) {
+                        // Previous tap had zero effect & was blacklisted; re-scan immediately without repeating it
+                        delay(80L)
+                        continue
+                    }
+                }
+
+                if (analysis.tiles.isNotEmpty()) {
+                    BotDiagnosticLog.recordSnapshot(analysis)
+                }
                 BotStateBridge.recordAnalysis(analysis)
                 withContext(Dispatchers.Main) {
                     if (BotStateBridge.settings.value.showMoveOverlay) {
@@ -280,26 +314,28 @@ class ScreenBotService : Service() {
                     continue
                 }
 
-                // Execute safe prefix of predicted moves until a Match-3 clears or an UNKNOWN tile unlocks
-                for (move in plan) {
-                    if (!isActive || !isAutoPlaying) break
+                // Closed-loop step execution: execute top predicted move, wait for settle, and re-capture to verify & see newly unlocked tiles
+                val move = plan.first()
+                BotStateBridge.setStatus(
+                    status = BotRuntimeStatus.RUNNING,
+                    action = "Tap #${move.stepNumber}: ${move.reason}",
+                )
+                withContext(Dispatchers.Main) { updateHudUi() }
 
-                    BotStateBridge.setStatus(
-                        status = BotRuntimeStatus.RUNNING,
-                        action = "Tap #${move.stepNumber}: ${move.reason}",
-                    )
-                    withContext(Dispatchers.Main) { updateHudUi() }
+                accService.performTap(move.tapX, move.tapY)
+                BotStateBridge.recordMoveExecuted(move.clearsMatch3)
+                pendingVerification = PendingVerification(
+                    move = move,
+                    beforeTray = analysis.trayOccupiedCount,
+                    beforeTiles = analysis.tiles.size,
+                )
 
-                    accService.performTap(move.tapX, move.tapY)
-                    BotStateBridge.recordMoveExecuted(move.clearsMatch3)
-
-                    delay(if (move.clearsMatch3) settings.clearSettleDelayMs else settings.tapDelayMs)
-
-                    if (move.clearsMatch3 || move.uncoversUnknown) {
-                        break // Re-capture clean screen state to observe revealed tiles & confirm tray
-                    }
+                val waitMs = if (move.clearsMatch3) {
+                    settings.clearSettleDelayMs
+                } else {
+                    settings.tapDelayMs.coerceAtLeast(220L)
                 }
-                delay(120L)
+                delay(waitMs)
             }
         }
     }
@@ -314,29 +350,47 @@ class ScreenBotService : Service() {
                 )
                 return@launch
             }
-            val analysis = captureAndAnalyze() ?: return@launch
-            BotStateBridge.recordAnalysis(analysis)
+            val before = captureAndAnalyze() ?: return@launch
+            BotDiagnosticLog.recordSnapshot(before, extraNote = "before_single_step")
+            BotStateBridge.recordAnalysis(before)
             withContext(Dispatchers.Main) {
                 if (BotStateBridge.settings.value.showMoveOverlay) {
-                    moveOverlayView?.updateAnalysis(analysis)
+                    moveOverlayView?.updateAnalysis(before)
                 }
                 updateHudUi()
             }
-            val nextMove = analysis.plan.firstOrNull() ?: return@launch
+            val nextMove = before.plan.firstOrNull() ?: return@launch
             BotStateBridge.setStatus(
                 status = BotRuntimeStatus.READY,
                 action = "Stepped: ${nextMove.reason}",
             )
             accService.performTap(nextMove.tapX, nextMove.tapY)
             BotStateBridge.recordMoveExecuted(nextMove.clearsMatch3)
-            delay(300L)
-            analyzeOnceAndPreview()
+            delay(360L)
+
+            val after = captureAndAnalyze() ?: return@launch
+            BotDiagnosticLog.recordTapOutcome(
+                move = nextMove,
+                beforeTray = before.trayOccupiedCount,
+                afterTray = after.trayOccupiedCount,
+                beforeTiles = before.tiles.size,
+                afterTiles = after.tiles.size,
+            )
+            BotDiagnosticLog.recordSnapshot(after, extraNote = "after_single_step")
+            BotStateBridge.recordAnalysis(after)
+            withContext(Dispatchers.Main) {
+                if (BotStateBridge.settings.value.showMoveOverlay) {
+                    moveOverlayView?.updateAnalysis(after)
+                }
+                updateHudUi()
+            }
         }
     }
 
     private fun analyzeOnceAndPreview() {
         serviceScope.launch {
             val analysis = captureAndAnalyze() ?: return@launch
+            BotDiagnosticLog.recordSnapshot(analysis, extraNote = "manual_scan")
             BotStateBridge.recordAnalysis(analysis)
             withContext(Dispatchers.Main) {
                 if (BotStateBridge.settings.value.showMoveOverlay) {
@@ -422,7 +476,7 @@ class ScreenBotService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        // 1. Non-touchable transparent move visualizer overlay
+        // 1. Non-touchable transparent move visualizer overlay aligned pixel-for-pixel with MediaProjection (cutout-aware)
         val visualizer = FloatingMoveOverlayView(this)
         val visParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -430,9 +484,16 @@ class ScreenBotService : Service() {
             overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
-        )
+        ).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         windowManager.addView(visualizer, visParams)
         moveOverlayView = visualizer
 

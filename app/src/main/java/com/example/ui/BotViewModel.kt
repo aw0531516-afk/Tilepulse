@@ -6,7 +6,9 @@ import android.content.Context
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.BotDiagnosticLog
 import com.example.data.BotPreferencesRepository
+import com.example.data.TrainingMetrics
 import com.example.model.BotLiveTelemetry
 import com.example.model.BotSettings
 import com.example.model.RoiCalibration
@@ -35,6 +37,8 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     val telemetry: StateFlow<BotLiveTelemetry> = BotStateBridge.telemetry
+
+    val trainingMetrics: StateFlow<TrainingMetrics> = BotDiagnosticLog.metrics
 
     init {
         viewModelScope.launch {
@@ -72,6 +76,12 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendBotCommand(command: BotCommand) {
         BotStateBridge.sendCommand(command)
+    }
+
+    fun getShareableTrainingLog(): String = BotDiagnosticLog.buildShareableReport()
+
+    fun resetTrainingMemory() {
+        BotDiagnosticLog.clearSession()
     }
 
     private fun isAccessibilityEnabledInSettings(context: Context): Boolean {

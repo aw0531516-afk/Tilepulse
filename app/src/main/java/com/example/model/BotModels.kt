@@ -8,7 +8,7 @@ data class RoiCalibration(
     val boardLeft: Float = 0.08f,
     val boardRight: Float = 0.92f,
     val boardTop: Float = 0.19f,
-    val boardBottom: Float = 0.675f,
+    val boardBottom: Float = 0.785f,
     val sideStackTop: Float = 0.545f,
     val trayLeft: Float = 0.055f,
     val trayRight: Float = 0.945f,

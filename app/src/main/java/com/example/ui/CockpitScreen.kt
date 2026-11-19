@@ -16,9 +16,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.ScreenshotMonitor
@@ -46,6 +49,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.data.TrainingMetrics
 import com.example.model.BotLiveTelemetry
 import com.example.model.BotRuntimeStatus
 import com.example.model.BotSettings
@@ -62,11 +66,14 @@ import kotlin.math.roundToInt
 fun CockpitScreen(
     telemetry: BotLiveTelemetry,
     settings: BotSettings,
+    trainingMetrics: TrainingMetrics,
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onLaunchFloatingBot: () -> Unit,
     onSendCommand: (BotCommand) -> Unit,
     onUpdateSettings: ((BotSettings) -> BotSettings) -> Unit,
+    onCopyTrainingLog: () -> Unit,
+    onResetTrainingMemory: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scrollState = rememberScrollState()
@@ -397,6 +404,81 @@ fun CockpitScreen(
                     testTag = "toggle_auto_booster_switch",
                     onCheckedChange = { checked -> onUpdateSettings { it.copy(autoUseBoosters = checked) } },
                 )
+            }
+        }
+
+        // Self-Training & Diagnostic Log Card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            border = BorderStroke(1.dp, SlateBorder),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Psychology, contentDescription = null, tint = EmeraldSafe)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Self-Training & Diagnostic Log",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = "Automatically verifies every tap outcome, blacklists empty/false spots, and captures board telemetry to copy & paste.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    MetricChip(
+                        label = "Verified",
+                        value = "${trainingMetrics.verifiedTaps}",
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricChip(
+                        label = "Phantom",
+                        value = "${trainingMetrics.phantomMisses}",
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricChip(
+                        label = "Blocked",
+                        value = "${trainingMetrics.blacklistedSpots}",
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    FilledTonalButton(
+                        onClick = onCopyTrainingLog,
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("copy_training_log_button"),
+                    ) {
+                        Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy Log")
+                    }
+
+                    OutlinedButton(
+                        onClick = onResetTrainingMemory,
+                        border = BorderStroke(1.dp, SlateBorder),
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("reset_training_memory_button"),
+                    ) {
+                        Icon(Icons.Rounded.DeleteSweep, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Clear")
+                    }
+                }
             }
         }
         Spacer(modifier = Modifier.height(12.dp))
