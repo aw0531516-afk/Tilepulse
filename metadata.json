@@ -1,0 +1,6 @@
+{
+  "name": "TilePulse Bot",
+  "description": "Smart on-device tile-matching puzzle assistant with layered occlusion vision, dependency DAG lookahead solver, and automated touch execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

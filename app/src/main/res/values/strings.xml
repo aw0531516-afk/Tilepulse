@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">TilePulse Bot</string>
+    <string name="accessibility_service_description">Reads tap targets and performs automated tile-matching taps on your 3-tile puzzle game when you press Play on the floating bot board.</string>
+    <string name="notification_channel_name">TilePulse Bot Service</string>
+    <string name="notification_channel_desc">Keeps screen analysis and floating smart controls active over your game.</string>
+    <string name="notification_title">TilePulse Bot Active</string>
+    <string name="notification_text">Floating control board is ready over your game.</string>
+</resources>
